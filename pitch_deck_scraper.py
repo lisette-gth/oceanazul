@@ -1,21 +1,22 @@
+import streamlit as st
 import os
 import re
 import pandas as pd
 import PyPDF2
+import tempfile
 from collections import defaultdict
 
 class PitchDeckScraper:
     def __init__(self):
         self.results = defaultdict(dict)
         
-    def extract_text_from_pdf(self, pdf_path):
+    def extract_text_from_pdf(self, pdf_file):
         """Extract all text from a PDF file."""
-        with open(pdf_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            text = ""
-            for page_num in range(len(reader.pages)):
-                text += reader.pages[page_num].extract_text() + "\n"
-            return text
+        reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page_num in range(len(reader.pages)):
+            text += reader.pages[page_num].extract_text() + "\n"
+        return text
     
     def extract_company_name(self, text):
         """Try to extract company name from the pitch deck."""
@@ -97,10 +98,9 @@ class PitchDeckScraper:
         
         return None
     
-    def process_pitch_deck(self, pdf_path):
+    def process_pitch_deck(self, pdf_file, filename):
         """Process a single pitch deck and extract key information."""
-        filename = os.path.basename(pdf_path)
-        text = self.extract_text_from_pdf(pdf_path)
+        text = self.extract_text_from_pdf(pdf_file)
         
         company_name = self.extract_company_name(text) or "Unknown"
         
@@ -114,37 +114,91 @@ class PitchDeckScraper:
         
         return self.results[filename]
     
-    def process_directory(self, directory_path):
-        """Process all PDF files in a directory."""
-        for filename in os.listdir(directory_path):
-            if filename.lower().endswith('.pdf'):
-                pdf_path = os.path.join(directory_path, filename)
-                self.process_pitch_deck(pdf_path)
-        
-        return self.results
-    
     def to_dataframe(self):
         """Convert results to a pandas DataFrame."""
         return pd.DataFrame.from_dict(self.results, orient='index')
-    
-    def export_to_csv(self, output_path="pitch_deck_data.csv"):
-        """Export the results to a CSV file."""
-        df = self.to_dataframe()
-        df.to_csv(output_path, index_label="filename")
-        print(f"Data exported to {output_path}")
 
-# Example usage
+# Streamlit app
+def main():
+    st.set_page_config(page_title="Pitch Deck Analyzer", layout="wide")
+    
+    st.title("Startup Pitch Deck Analyzer")
+    st.write("""
+    Upload startup pitch decks in PDF format to extract key information such as company name, 
+    funding sought, valuation, founders, and market size.
+    """)
+    
+    # Initialize session state for storing results
+    if 'scraped_data' not in st.session_state:
+        st.session_state.scraped_data = defaultdict(dict)
+    
+    # File uploader
+    uploaded_files = st.file_uploader("Upload Pitch Deck PDFs", type=["pdf"], accept_multiple_files=True)
+    
+    if uploaded_files:
+        scraper = PitchDeckScraper()
+        
+        with st.spinner('Processing PDFs...'):
+            # Process each uploaded file
+            for uploaded_file in uploaded_files:
+                # Create a temporary file
+                with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                    temp_file.write(uploaded_file.getvalue())
+                    temp_path = temp_file.name
+                
+                try:
+                    # Process the file
+                    with open(temp_path, 'rb') as file:
+                        result = scraper.process_pitch_deck(file, uploaded_file.name)
+                        st.session_state.scraped_data[uploaded_file.name] = result
+                finally:
+                    # Clean up the temporary file
+                    os.unlink(temp_path)
+        
+        # Convert results to DataFrame
+        if st.session_state.scraped_data:
+            df = pd.DataFrame.from_dict(st.session_state.scraped_data, orient='index')
+            df = df.reset_index().rename(columns={"index": "filename"})
+            
+            # Display the DataFrame
+            st.subheader("Extracted Data")
+            st.dataframe(df)
+            
+            # Allow CSV download
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="Download as CSV",
+                data=csv,
+                file_name="pitch_deck_analysis.csv",
+                mime="text/csv",
+            )
+            
+            # Display some visualizations if we have enough data
+            if len(df) > 1:
+                st.subheader("Analysis")
+                
+                # Funding sought analysis
+                st.write("### Funding Sought (in $ millions)")
+                # Extract funding amounts from lists
+                funding_data = []
+                for idx, row in df.iterrows():
+                    company = row['company_name']
+                    if row['funding_sought'] and isinstance(row['funding_sought'], list):
+                        for amount in row['funding_sought']:
+                            funding_data.append({
+                                'Company': company,
+                                'Amount ($ millions)': amount
+                            })
+                
+                if funding_data:
+                    funding_df = pd.DataFrame(funding_data)
+                    st.bar_chart(funding_df.set_index('Company'))
+                
+                # Market size analysis if available
+                market_sizes = df[df['market_size_billions'].notna()]
+                if not market_sizes.empty:
+                    st.write("### Market Size (in $ billions)")
+                    st.bar_chart(market_sizes.set_index('company_name')['market_size_billions'])
+
 if __name__ == "__main__":
-    scraper = PitchDeckScraper()
-    
-    # Process a single PDF
-    # result = scraper.process_pitch_deck("path/to/pitch_deck.pdf")
-    # print(result)
-    
-    # Process a directory of PDFs
-    # directory_results = scraper.process_directory("path/to/pitch_decks")
-    # df = scraper.to_dataframe()
-    # print(df)
-    
-    # Export to CSV
-    # scraper.export_to_csv("startup_data.csv")
+    main()
