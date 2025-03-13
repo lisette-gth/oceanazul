@@ -2,9 +2,29 @@ import streamlit as st
 import os
 import re
 import pandas as pd
-import PyPDF2
 import tempfile
 from collections import defaultdict
+
+# Check for PyPDF2 and provide installation instructions if not found
+try:
+    import PyPDF2
+except ImportError:
+    st.error("""
+    ### Error: PyPDF2 is not installed
+    
+    This app requires the PyPDF2 library. Please install it using:
+    ```
+    pip install PyPDF2==3.0.1
+    ```
+    
+    If you're using a hosted Streamlit environment, you may need to:
+    1. Create a requirements.txt file with these dependencies:
+       - streamlit
+       - pandas
+       - PyPDF2
+    2. Restart your Streamlit app
+    """)
+    st.stop()
 
 class PitchDeckScraper:
     def __init__(self):
@@ -12,14 +32,25 @@ class PitchDeckScraper:
         
     def extract_text_from_pdf(self, pdf_file):
         """Extract all text from a PDF file."""
-        reader = PyPDF2.PdfReader(pdf_file)
-        text = ""
-        for page_num in range(len(reader.pages)):
-            text += reader.pages[page_num].extract_text() + "\n"
-        return text
+        try:
+            reader = PyPDF2.PdfReader(pdf_file)
+            text = ""
+            for page_num in range(len(reader.pages)):
+                page_text = reader.pages[page_num].extract_text()
+                if page_text:  # Check if text was extracted successfully
+                    text += page_text + "\n"
+                else:
+                    st.warning(f"No text could be extracted from page {page_num+1}. This page may contain only images.")
+            return text
+        except Exception as e:
+            st.error(f"Error extracting text from PDF: {str(e)}")
+            return ""
     
     def extract_company_name(self, text):
         """Try to extract company name from the pitch deck."""
+        if not text:
+            return None
+            
         # Look for common patterns in pitch decks
         patterns = [
             r"(?:About|Company:?|About Us:?)\s+([A-Z][A-Za-z0-9\s]{2,30}(?:Inc\.?|LLC|Corp\.?|Co\.?)?)",
@@ -35,6 +66,9 @@ class PitchDeckScraper:
     
     def extract_funding_amount(self, text):
         """Extract funding amounts mentioned in the deck."""
+        if not text:
+            return None
+            
         funding_pattern = r"(?:raising|raise|seeking|investment of|funding of|looking for)?\s*\$?(\d+(?:\.\d+)?)\s*(?:M|MM|Million|million|K|k|thousand|Thousand)"
         funding_matches = re.finditer(funding_pattern, text)
         
@@ -54,6 +88,9 @@ class PitchDeckScraper:
     
     def extract_valuation(self, text):
         """Extract company valuation from the deck."""
+        if not text:
+            return None
+            
         valuation_pattern = r"(?:valuation|valued at|worth|post-money|pre-money).*?\$?(\d+(?:\.\d+)?)\s*(?:M|MM|Million|million|B|billion|Billion)"
         valuation_match = re.search(valuation_pattern, text, re.IGNORECASE)
         
@@ -71,6 +108,9 @@ class PitchDeckScraper:
     
     def extract_founders(self, text):
         """Extract founder information."""
+        if not text:
+            return None
+            
         founder_section = re.search(r"(?:Team|Founders|Management).*?(?:Market|Product|Traction|Financials|Competition)", text, re.DOTALL | re.IGNORECASE)
         
         if founder_section:
@@ -83,6 +123,9 @@ class PitchDeckScraper:
     
     def extract_market_size(self, text):
         """Extract market size information."""
+        if not text:
+            return None
+            
         market_pattern = r"(?:TAM|Total Addressable Market|Market Size|Market Opportunity).*?\$?(\d+(?:\.\d+)?)\s*(?:B|billion|Billion|T|trillion|Trillion)"
         market_match = re.search(market_pattern, text, re.IGNORECASE)
         
@@ -102,6 +145,10 @@ class PitchDeckScraper:
         """Process a single pitch deck and extract key information."""
         text = self.extract_text_from_pdf(pdf_file)
         
+        if not text:
+            st.warning(f"No text could be extracted from {filename}. The file may be scanned or contain only images.")
+            return {"company_name": "Unknown", "status": "Extraction failed"}
+        
         company_name = self.extract_company_name(text) or "Unknown"
         
         self.results[filename] = {
@@ -109,7 +156,8 @@ class PitchDeckScraper:
             "funding_sought": self.extract_funding_amount(text),
             "valuation": self.extract_valuation(text),
             "founders": self.extract_founders(text),
-            "market_size_billions": self.extract_market_size(text)
+            "market_size_billions": self.extract_market_size(text),
+            "status": "Success"
         }
         
         return self.results[filename]
@@ -128,6 +176,12 @@ def main():
     funding sought, valuation, founders, and market size.
     """)
     
+    # Display environment info
+    with st.expander("Environment Information"):
+        st.write(f"Streamlit version: {st.__version__}")
+        st.write(f"Pandas version: {pd.__version__}")
+        st.write(f"PyPDF2 version: {PyPDF2.__version__}")
+    
     # Initialize session state for storing results
     if 'scraped_data' not in st.session_state:
         st.session_state.scraped_data = defaultdict(dict)
@@ -138,22 +192,29 @@ def main():
     if uploaded_files:
         scraper = PitchDeckScraper()
         
-        with st.spinner('Processing PDFs...'):
-            # Process each uploaded file
-            for uploaded_file in uploaded_files:
-                # Create a temporary file
-                with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                    temp_file.write(uploaded_file.getvalue())
-                    temp_path = temp_file.name
-                
-                try:
-                    # Process the file
-                    with open(temp_path, 'rb') as file:
-                        result = scraper.process_pitch_deck(file, uploaded_file.name)
-                        st.session_state.scraped_data[uploaded_file.name] = result
-                finally:
-                    # Clean up the temporary file
-                    os.unlink(temp_path)
+        progress_bar = st.progress(0)
+        progress_text = st.empty()
+        
+        # Process each uploaded file
+        for i, uploaded_file in enumerate(uploaded_files):
+            progress_text.text(f"Processing: {uploaded_file.name}")
+            progress_bar.progress((i + 0.5) / len(uploaded_files))
+            
+            try:
+                # Process the file directly from memory
+                uploaded_file.seek(0)  # Reset file pointer to beginning
+                result = scraper.process_pitch_deck(uploaded_file, uploaded_file.name)
+                st.session_state.scraped_data[uploaded_file.name] = result
+            except Exception as e:
+                st.error(f"Error processing {uploaded_file.name}: {str(e)}")
+                st.session_state.scraped_data[uploaded_file.name] = {
+                    "company_name": "Error",
+                    "status": f"Failed: {str(e)}"
+                }
+            
+            progress_bar.progress((i + 1) / len(uploaded_files))
+        
+        progress_text.text("Processing complete!")
         
         # Convert results to DataFrame
         if st.session_state.scraped_data:
@@ -178,12 +239,10 @@ def main():
                 st.subheader("Analysis")
                 
                 # Funding sought analysis
-                st.write("### Funding Sought (in $ millions)")
-                # Extract funding amounts from lists
                 funding_data = []
                 for idx, row in df.iterrows():
                     company = row['company_name']
-                    if row['funding_sought'] and isinstance(row['funding_sought'], list):
+                    if row.get('funding_sought') and isinstance(row['funding_sought'], list):
                         for amount in row['funding_sought']:
                             funding_data.append({
                                 'Company': company,
@@ -191,6 +250,7 @@ def main():
                             })
                 
                 if funding_data:
+                    st.write("### Funding Sought (in $ millions)")
                     funding_df = pd.DataFrame(funding_data)
                     st.bar_chart(funding_df.set_index('Company'))
                 
